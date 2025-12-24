@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 import os
+import json
 
 from server.utils import load_config, save_config
 
@@ -29,6 +30,25 @@ def get_version():
   # read version.txt from the root directory
   with open("version.txt", "r") as f:
     return PlainTextResponse(f.read().strip())
+
+# this get returns search results for the event.
+@app.get("/event/{text}")
+def get_event(text: str):
+  # read events.json from the root directory
+  with open("data/events.json", "r", encoding="utf-8") as f:
+    events = json.load(f)
+  words = text.split(" ")
+  results = []
+  for choice in events["choiceArraySchema"]["choices"]:
+    for value in choice.values():
+      for word in words:
+        if word not in value.lower():
+          break
+      else:
+        results.append(choice)
+        break
+
+  return {"data": results}
 
 @app.get("/data/{path:path}")
 async def get_data_file(path: str):
