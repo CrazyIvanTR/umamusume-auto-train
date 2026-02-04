@@ -15795,9 +15795,7 @@ const ConfigSchema = object({
   use_adb: boolean(),
   device_id: string(),
   notifications_enabled: boolean(),
-  info_notification: string(),
   error_notification: string(),
-  success_notification: string(),
   use_race_schedule: boolean(),
   cancel_consecutive_race: boolean(),
   position_selection_enabled: boolean(),
@@ -15878,13 +15876,8 @@ function useNotifications(config2) {
         const data = await res.json();
         if (data.notifications && data.notifications.length > 0) {
           data.notifications.forEach((type) => {
-            if (!config2.notifications_enabled) return;
-            let soundFile = "";
-            if (type === "error") soundFile = config2.error_notification;
-            if (type === "info") soundFile = config2.info_notification;
-            if (type === "success") soundFile = config2.success_notification;
-            if (soundFile) {
-              const audio = new Audio(`/notifications/${soundFile}`);
+            if (type === "error" && config2.notifications_enabled && config2.error_notification) {
+              const audio = new Audio(`/notifications/${config2.error_notification}`);
               audio.play().catch((e) => console.error("Failed to play notification sound:", e));
             }
           });
@@ -25878,9 +25871,7 @@ function SetUpSection({ config: config2, updateConfig }) {
     use_adb: use_adb2,
     device_id: device_id2,
     notifications_enabled: notifications_enabled2,
-    info_notification: info_notification2,
-    error_notification: error_notification2,
-    success_notification: success_notification2
+    error_notification: error_notification2
   } = config2;
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "section-card", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("h2", { className: "text-3xl font-semibold mb-6 flex items-center gap-3", children: [
@@ -25934,11 +25925,7 @@ function SetUpSection({ config: config2, updateConfig }) {
         /* @__PURE__ */ jsxRuntimeExports.jsx(Checkbox, { checked: notifications_enabled2, onCheckedChange: () => updateConfig("notifications_enabled", !notifications_enabled2) }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "font-base", children: "Enable notification sounds" })
       ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { className: `uma-label ${notifications_enabled2 ? "" : "disabled"}`, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex gap-2 items-center", children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "font-base", children: "Info sound" }) }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx(Input, { className: "w-48", value: info_notification2, onChange: (e) => updateConfig("info_notification", e.target.value) })
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { className: `uma-label ${notifications_enabled2 ? "" : "disabled"}`, children: [
+      notifications_enabled2 && /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { className: "flex flex-row gap-2 h-fit items-center cursor-pointer", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex gap-2 items-center", children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "font-base", children: "Error sound" }) }),
         /* @__PURE__ */ jsxRuntimeExports.jsx(
           Input,
@@ -25946,17 +25933,6 @@ function SetUpSection({ config: config2, updateConfig }) {
             className: "w-48",
             value: error_notification2,
             onChange: (e) => updateConfig("error_notification", e.target.value)
-          }
-        )
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { className: `uma-label ${notifications_enabled2 ? "" : "disabled"}`, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex gap-2 items-center", children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "font-base", children: "Success sound" }) }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx(
-          Input,
-          {
-            className: "w-48",
-            value: success_notification2,
-            onChange: (e) => updateConfig("success_notification", e.target.value)
           }
         )
       ] })
