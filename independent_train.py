@@ -12,8 +12,8 @@
 #         Post-Career ribbon (training completed) -> popup -> Career button ->
 #         Complete Career screen -> finish the career,
 #         Training Independently ribbon (training running) -> popup -> OCR
-#         timer -> wait at the popup until it shows 0:00:00 (falls back to
-#         polling inside the training view),
+#         timer -> wait at the popup until it shows 0:00:00 (interrupting
+#         popups are dismissed with their OK button),
 #         Career button (no training) -> start a new career
 #   2   scenario selection -> next
 #   3   trainee selection -> next
@@ -630,7 +630,7 @@ def plan_purchases(entries, skill_points):
   info(f"Purchase plan: {sum(len(item['names']) for item in picks)} skills ({wanted_count} from the buy list) "
        f"for {spent} SP, {remaining} SP left over.")
   for item in picks:
-    chain = " (gold, base auto-bought)" if item["successor"] else ""
+    chain = " (gold skill; base auto-bought)" if item["successor"] else ""
     info(f"  Plan: {', '.join(item['names'])} for {item['cost']} SP{chain}.")
   return picks
 
@@ -801,17 +801,33 @@ def read_popup_time_left():
   h, m, s = (int(part) for part in match.groups())
   return h * 3600 + m * 60 + s
 
+def dismiss_popup_ok():
+  # Dismiss a system popup covering the training popup with its OK button
+  # (ok_2_btn first, then ok_btn). Only OK buttons are pressed on purpose:
+  # the training popup itself has a Cancel button that must never be clicked
+  # here, and generic dismiss_popups() would also click it.
+  for name in ("ok_2_btn", "ok_btn"):
+    if device_action.locate_and_click(dismiss_templates[name], min_search_time=get_secs(1), region_ltrb=game_window_ltrb()):
+      info(f"Dismissed an interrupting popup with {name}.")
+      sleep(get_secs(1))
+      return True
+  return False
+
 def wait_independent_training_popup(max_wait_s=55 * 60):
   # Wait at the Independent Training popup until the training ends: OCR the
   # time left once, sleep the countdown in real time, then confirm "0:00:00"
-  # with a second read. A mismatched confirm loops into a fresh read (bounded
-  # by max_wait_s). True when the timer confirmed zero.
+  # with a second read. An interrupting popup that covers the timer is
+  # dismissed with its OK button and the read retried; a mismatched confirm
+  # loops into a fresh read (both bounded by max_wait_s). True when the timer
+  # confirmed zero.
   deadline = time.time() + max_wait_s
   while time.time() < deadline:
     if not bot.is_bot_running:
       return False
     seconds_left = read_popup_time_left()
     if seconds_left is None:
+      if dismiss_popup_ok():
+        continue
       warning("Could not read the time left on the Independent Training popup.")
       return False
     if seconds_left <= 0:
@@ -834,6 +850,8 @@ def wait_independent_training_popup(max_wait_s=55 * 60):
         print_progress(slept, total)
     confirm = read_popup_time_left()
     if confirm is None:
+      if dismiss_popup_ok():
+        continue
       warning("Could not re-read the popup timer to confirm the countdown.")
       return False
     if confirm > 0:
@@ -872,40 +890,6 @@ def wait_for_training_completion(timeout_s=900):
     sleep(1)
   error(f"No known training-completion state appeared within {timeout_s} seconds.")
   return None
-
-def handle_in_progress_training():
-  # A training is already running (Training Independently popup): poll every 30s for up to 50 minutes, then proceed with the post-training flow.
-  max_wait = 50 * 60
-  interval = 30
-  polls = max_wait // interval
-  info(f"Independent training in progress. Polling every {interval}s for up to {max_wait}s.")
-
-  for i in range(1, polls + 1):
-    if not bot.is_bot_running:
-      return False
-    remaining = max_wait - (i - 1) * interval
-    info(f"Poll {i}/{polls} — waiting {interval}s ({remaining // 60}min remaining max).")
-    sleep(interval)
-    device_action.flush_screenshot_cache()
-    if locate_grayscale(flow_templates["independent_training_banner"], min_search_time=0):
-      debug("Independent Training view still on screen, training not finished yet.")
-    # Check whether the career has ended
-    if locate_grayscale(flow_templates["complete_career_btn"], min_search_time=get_secs(2)):
-      info("Complete Career screen detected — training done.")
-      break
-    if locate_grayscale(flow_templates["overview"], min_search_time=get_secs(2)):
-      info("Overview screen detected — training done.")
-      wait_for_and_click("assets/buttons/ok_btn.png", timeout_s=get_secs(15))
-      break
-    if locate_grayscale(flow_templates["post_career"], min_search_time=get_secs(2)):
-      info("Post-Career button detected — training done, opening its popup.")
-      open_post_career_popup()
-      break
-  else:
-    warning("Polling exhausted after 50 minutes, proceeding anyway.")
-
-  info("Finishing the completed career.")
-  return complete_career()
 
 def click_popup_career_button(timeout_s=20):
   # Press the popup's green Career button until it leaves the screen: a tap during the popup's entrance animation can be swallowed, so keep pressing. False when the button never appeared or never left.
@@ -979,29 +963,22 @@ def handle_post_career_state():
 def handle_training_independently_state():
   # Training Independently ribbon: a training is running. Open its popup and
   # wait there for the OCR timer to hit zero (saves sitting on the resource-
-  # heavy training view). Falls back to polling inside the training view when
-  # the popup timer can't be read.
+  # heavy training view; no polling needed since the timer is read directly).
   info("Career state: Training Independently (training in progress).")
   if not locate_grayscale_and_click(flow_templates["training_independently"], min_search_time=get_secs(2)):
     warning("Could not click the Training Independently button.")
     return False
-  if wait_independent_training_popup():
-    # Training done: the popup's Career button now leads to the overview /
-    # Complete Career screen (same path as the Post-Career popup).
-    if not click_popup_career_button():
-      return False
-    if not ensure_complete_career_screen():
-      error("Complete Career screen did not appear after the popup's Career button.")
-      return False
-    info("Complete Career screen reached, finishing the leftover career.")
-    return complete_career(screen_verified=True)
-  # Fallback: enter the training view and poll as before.
-  click_popup_career_button()  # best effort: enter the training view
-  info("Waiting for the training to finish.")
-  if not handle_in_progress_training():
+  if not wait_independent_training_popup():
     return False
-  info("Training finished, restarting the cycle.")
-  return True
+  # Training done: the popup's Career button now leads to the overview /
+  # Complete Career screen (same path as the Post-Career popup).
+  if not click_popup_career_button():
+    return False
+  if not ensure_complete_career_screen():
+    error("Complete Career screen did not appear after the popup's Career button.")
+    return False
+  info("Complete Career screen reached, finishing the leftover career.")
+  return complete_career(screen_verified=True)
 
 def unspent_skill_points_visible(attempts=3):
   # Check for the unspent-points exclamation mark, retrying a few times: the icon can appear with a short animation.
