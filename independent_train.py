@@ -14,7 +14,8 @@
 #         Complete Career screen -> finish the career,
 #         Training Independently ribbon (training running) -> popup -> OCR
 #         timer -> wait at the popup until it shows 0:00:00 (interrupting
-#         popups are dismissed with their OK button),
+#         popups are dismissed with their OK button; if the popup closes
+#         first, the overview/Complete Career screen is detected instead),
 #         Career button (no training) -> start a new career
 #   2   scenario selection -> next
 #   3   trainee selection -> next
@@ -33,8 +34,8 @@
 #   13  independent training: verify it actually began (the game can bounce
 #       back to the Support Formation screen right after Start!), then leave
 #       for the home screen via the Menu (13B: To Home) and wait at the
-#       Independent Training popup for the OCR timer to hit 0:00:00 (falls
-#       back to sleeping at the training view)
+#       Independent Training popup for the OCR timer to hit 0:00:00 (a popup
+#       that closes first is caught by polling the completion screens)
 #   14  overview screen -> OK
 #   15  complete career screen -> spend all skill points (16-18: skill screen
 #       rounds, repeating while unspent points are detected):
@@ -827,26 +828,58 @@ def dismiss_popup_ok():
       return True
   return False
 
+def poll_training_completion_state(timeout_s=60):
+  # The popup can close as the timer hits zero, before the confirm OCR read.
+  # Poll the screens that follow a finished training for a short grace period
+  # so the wait does not abort mid-transition. Returns "overview", "complete",
+  # "post_career", "home" or None.
+  deadline = time.time() + timeout_s
+  while time.time() < deadline:
+    if not bot.is_bot_running:
+      return None
+    device_action.flush_screenshot_cache()
+    if locate_grayscale(flow_templates["independent_training_popup"], min_search_time=0):
+      # Still open: the screens behind it are not actionable, so this is not
+      # the popup-closed case (the caller retries or fails as before).
+      return None
+    if locate_grayscale(flow_templates["overview"], min_search_time=0):
+      info("Training overview screen detected after the popup closed.")
+      return "overview"
+    if locate_grayscale(flow_templates["complete_career_btn"], min_search_time=0):
+      info("Complete Career screen detected after the popup closed.")
+      return "complete"
+    state = detect_career_state(min_search=0)
+    if state == "post_career":
+      info("Home screen with the Post-Career ribbon detected after the popup closed.")
+      return "post_career"
+    if state == "career_btn":
+      info("Home screen detected with no career running after the popup closed.")
+      return "home"
+    sleep(1)
+  return None
+
 def wait_independent_training_popup(max_wait_s=55 * 60):
   # Wait at the Independent Training popup until the training ends: OCR the
-  # time left once, sleep the countdown in real time, then confirm "0:00:00"
-  # with a second read. An interrupting popup that covers the timer is
-  # dismissed with its OK button and the read retried; a mismatched confirm
-  # loops into a fresh read (both bounded by max_wait_s). True when the timer
-  # confirmed zero.
+  # time left, sleep the countdown in real time (never past max_wait_s), then
+  # confirm "0:00:00" with a second read. An interrupting popup that covers
+  # the timer is dismissed with its OK button and the read retried; a
+  # mismatched confirm loops into a fresh read. Returns "zero" when the timer
+  # confirmed zero, the completion state when the popup closed first
+  # ("overview", "complete", "post_career", "home"), or None on failure.
   deadline = time.time() + max_wait_s
   while time.time() < deadline:
     if not bot.is_bot_running:
-      return False
+      return None
     seconds_left = read_popup_time_left()
     if seconds_left is None:
       if dismiss_popup_ok():
         continue
       warning("Could not read the time left on the Independent Training popup.")
-      return False
+      return None
     if seconds_left <= 0:
       info("Independent Training popup shows 0:00:00 left, training finished.")
-      return True
+      return "zero"
+    info(f"Independent Training popup shows {seconds_left // 60}m {seconds_left % 60}s left, waiting at the popup.")
     # Real-time countdown with the same progress display the fresh-start path
     # uses; +5s buffer covers the OCR reads' own duration. Raw time.sleep on
     # purpose: SLEEP_TIME_MULTIPLIER must not scale a real-time wait.
@@ -855,7 +888,12 @@ def wait_independent_training_popup(max_wait_s=55 * 60):
     last_minute = total // 60
     slept = 0
     while slept < total and bot.is_bot_running:
-      chunk = min(15, total - slept)
+      # Never sleep past the overall deadline: an OCR over-read (or a system
+      # sleep that jumped the wall clock) must not strand the wait for hours.
+      remaining_budget = int(max(0, deadline - time.time()))
+      if remaining_budget <= 0:
+        break
+      chunk = min(15, total - slept, remaining_budget)
       time.sleep(chunk)
       slept += chunk
       minutes_left = (total - slept) // 60
@@ -866,12 +904,20 @@ def wait_independent_training_popup(max_wait_s=55 * 60):
     if confirm is None:
       if dismiss_popup_ok():
         continue
+      # The popup closed before the confirm read: treat a following
+      # completion screen as success instead of aborting the cycle.
+      state = poll_training_completion_state()
+      if state:
+        return state
       warning("Could not re-read the popup timer to confirm the countdown.")
-      return False
-    if confirm > 0:
-      warning(f"Popup timer still shows {confirm}s left after the countdown, re-reading.")
+      return None
+    debug(f"Popup timer re-read after the countdown: {confirm}s left.")
+    if confirm <= 0:
+      info("Independent Training popup shows 0:00:00 left, training finished.")
+      return "zero"
+    warning(f"Popup timer still shows {confirm}s left after the countdown, re-reading.")
   warning("Popup countdown did not reach zero in time.")
-  return False
+  return None
 
 def wait_for_training_completion(timeout_s=900):
   # After the training finishes the game may land on the overview, the Complete Career screen directly or the home screen; transitions can take minutes, so poll until a known state is confirmed. Returns "overview", "complete", "post_career", "home" (career already fully collected) or None.
@@ -982,9 +1028,24 @@ def handle_training_independently_state():
   if not locate_grayscale_and_click(flow_templates["training_independently"], min_search_time=get_secs(2)):
     warning("Could not click the Training Independently button.")
     return False
-  if not wait_independent_training_popup():
+  result = wait_independent_training_popup()
+  if not result:
     return False
-  # Training done: the popup's Career button now leads to the overview /
+  if result == "post_career":
+    info("Training finished and the career already ended; handling the Post-Career state.")
+    return handle_post_career_state()
+  if result == "home":
+    info("Training finished and the career is already collected; starting the next cycle.")
+    return True
+  if result != "zero":
+    # The popup closed before the confirm read and the game already moved on
+    # (overview / Complete Career screen): continue from there.
+    if not ensure_complete_career_screen():
+      error("Complete Career screen did not appear after the popup closed.")
+      return False
+    info("Complete Career screen reached, finishing the leftover career.")
+    return complete_career(screen_verified=True)
+  # Popup still open at 0:00:00: its Career button leads to the overview /
   # Complete Career screen (same path as the Post-Career popup).
   if not click_popup_career_button():
     return False
