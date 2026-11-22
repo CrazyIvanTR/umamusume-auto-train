@@ -8,7 +8,8 @@
 # to the screenshots in devtools/independent_flow; the whole loop lives in
 # run_career_cycle():
 #   1   home screen -> career button state (1B shows the Independent Training
-#       popup while a career is running/finished):
+#       popup while a career is running/finished); unrecognized intro/notice
+#       screens are advanced with a safe-space tap:
 #         Post-Career ribbon (training completed) -> popup -> Career button ->
 #         Complete Career screen -> finish the career,
 #         Training Independently ribbon (training running) -> popup -> OCR
@@ -218,6 +219,7 @@ def game_window_ltrb():
   return constants.GAME_WINDOW_BBOX
 
 MAX_CARD_CYCLES = 75          # refresh cycles before giving up on a card
+MAX_ADVANCE_TAPS = 20         # safe-space taps allowed per blocked screen before giving up
 CARD_NAME_MATCH_THRESHOLD = 0.75  # rapidfuzz ratio required to accept an OCR name match
 
 # Skill screen ("Learn") constants, measured on a 800x1080 portrait screenshot.
@@ -311,6 +313,18 @@ def dismiss_popups(max_rounds=3):
     if not clicked:
       break
   return any_clicked
+
+def tap_to_advance():
+  # Universal "next" for story/dialogue/notice screens that have no template:
+  # the game advances them on any tap, so tap the main bot's safe space
+  # (top-center, deliberately clear of buttons). Only call this once the known
+  # navigation buttons and popups have all been ruled out, and cap the
+  # caller's own tap count.
+  if not bot.is_bot_running:
+    return False
+  device_action.click(target=constants.SAFE_SPACE_MOUSE_POS)
+  debug("Tapped the safe space to advance an unrecognized screen.")
+  return True
 
 def wait_for_and_click(img_path, timeout_s=20, region_ltrb=None, settle=0.5):
   deadline = time.time() + timeout_s
@@ -1114,9 +1128,13 @@ def complete_career(screen_verified=False):
 # Flow steps
 # ---------------------------------------------------------------------------
 def step_reach_home():
-  # Wait until the home screen shows one of the three career button states, actively navigating back when needed.
+  # Wait until the home screen shows one of the three career button states,
+  # actively navigating back when needed. When every known navigation button
+  # and popup fails, a bounded safe-space tap advances unrecognized
+  # intro/notice screens.
   home_states = (flow_templates["post_career"], flow_templates["training_independently"], flow_templates["career_btn"])
   deadline = time.time() + get_secs(60)
+  advance_taps = 0
   while time.time() < deadline:
     device_action.flush_screenshot_cache()
     for template in home_states:
@@ -1135,6 +1153,7 @@ def step_reach_home():
         return False
       handled = True
     if handled:
+      advance_taps = 0
       deadline = time.time() + get_secs(30)
       continue
     # Actively try to navigate back to home: the main menu's Home tab jumps
@@ -1142,17 +1161,26 @@ def step_reach_home():
     # before the slower to_home / back button walk.
     if device_action.locate_and_click(flow_templates["home_tab"], min_search_time=get_secs(1), region_ltrb=game_window_ltrb()):
       info("Clicked the main menu Home tab.")
+      advance_taps = 0
       sleep(get_secs(3))
       continue
     if device_action.locate_and_click("assets/buttons/to_home.png", min_search_time=get_secs(1), region_ltrb=game_window_ltrb()):
       info("Clicked 'to home' button.")
+      advance_taps = 0
       sleep(get_secs(3))
       continue
     if device_action.locate_and_click("assets/buttons/back_btn.png", min_search_time=get_secs(1), region_ltrb=game_window_ltrb()):
       info("Clicked 'back' button.")
+      advance_taps = 0
       sleep(get_secs(2))
       continue
-    dismiss_popups()
+    if dismiss_popups():
+      advance_taps = 0
+    elif advance_taps < MAX_ADVANCE_TAPS:
+      if advance_taps == 0:
+        info("No known navigation button or popup found, tapping to advance the screen.")
+      tap_to_advance()
+      advance_taps += 1
     sleep(0.5)
   error("Could not reach the home screen within 60 seconds.")
   return False
