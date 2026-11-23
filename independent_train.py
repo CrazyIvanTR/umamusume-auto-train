@@ -342,28 +342,6 @@ def click_back_btn():
   # Click the bottom-screen back button (exits the skill screen).
   return device_action.locate_and_click("assets/buttons/back_btn.png", min_search_time=get_secs(3), region_ltrb=constants.SCREEN_BOTTOM_BBOX)
 
-def locate_grayscale(img_path, threshold=0.85, min_search_time=0.0, region_ltrb=None):
-  # Grayscale matching for UI on animated backgrounds, where the button tint shifts and color matching only scores ~0.7 (e.g. the Complete Career screen).
-  region = region_ltrb or game_window_ltrb()
-  start_time = time.time()
-  while True:
-    device_action.flush_screenshot_cache()
-    screenshot = device_action.screenshot(region_ltrb=region)
-    boxes = device_action.match_template(img_path, screenshot, threshold=threshold, grayscale=True)
-    if boxes:
-      x, y, w, h = boxes[0]
-      return (x + region[0] + w // 2, y + region[1] + h // 2)
-    if time.time() - start_time >= min_search_time:
-      return None
-    sleep(0.5)
-
-def locate_grayscale_and_click(img_path, threshold=0.85, min_search_time=0.5, region_ltrb=None):
-  coordinates = locate_grayscale(img_path, threshold=threshold, min_search_time=min_search_time, region_ltrb=region_ltrb)
-  if coordinates:
-    device_action.click(target=coordinates)
-    return True
-  return False
-
 # ---------------------------------------------------------------------------
 # Card selection helpers
 # ---------------------------------------------------------------------------
@@ -575,7 +553,7 @@ def reopen_skill_screen(pages=0):
   # Back out and reopen the skill screen (much faster than scrolling back up); falls back to scrolling to the top. True when the skill screen is open.
   click_back_btn()
   sleep(get_secs(1))
-  if locate_grayscale_and_click("assets/buttons/complete_career_skills_btn.png", min_search_time=get_secs(5)):
+  if device_action.locate_and_click("assets/buttons/complete_career_skills_btn.png", min_search_time=get_secs(5)):
     sleep(get_secs(1))
     debug("Skill screen reopened, list back at the top.")
     return True
@@ -800,7 +778,7 @@ POPUP_TIMER_OFFSETS = (78, 231, 243, 275)  # timer region relative to the banner
 def read_popup_time_left():
   # OCR the "0:37:57 left" text on the Independent Training popup. Returns
   # seconds left, or None when the popup or its timer isn't found/readable.
-  banner = locate_grayscale(flow_templates["independent_training_popup"], min_search_time=get_secs(2))
+  banner = device_action.locate(flow_templates["independent_training_popup"], min_search_time=get_secs(2))
   if not banner:
     debug("Independent Training popup not found.")
     return None
@@ -838,14 +816,14 @@ def poll_training_completion_state(timeout_s=60):
     if not bot.is_bot_running:
       return None
     device_action.flush_screenshot_cache()
-    if locate_grayscale(flow_templates["independent_training_popup"], min_search_time=0):
+    if device_action.locate(flow_templates["independent_training_popup"], min_search_time=0):
       # Still open: the screens behind it are not actionable, so this is not
       # the popup-closed case (the caller retries or fails as before).
       return None
-    if locate_grayscale(flow_templates["overview"], min_search_time=0):
+    if device_action.locate(flow_templates["overview"], min_search_time=0):
       info("Training overview screen detected after the popup closed.")
       return "overview"
-    if locate_grayscale(flow_templates["complete_career_btn"], min_search_time=0):
+    if device_action.locate(flow_templates["complete_career_btn"], min_search_time=0):
       info("Complete Career screen detected after the popup closed.")
       return "complete"
     state = detect_career_state(min_search=0)
@@ -926,17 +904,17 @@ def wait_for_training_completion(timeout_s=900):
     device_action.flush_screenshot_cache()
     if not bot.is_bot_running:
       return None
-    if locate_grayscale(flow_templates["overview"], min_search_time=0):
+    if device_action.locate(flow_templates["overview"], min_search_time=0):
       info("Training overview screen detected.")
       return "overview"
-    if locate_grayscale(flow_templates["complete_career_btn"], min_search_time=0):
+    if device_action.locate(flow_templates["complete_career_btn"], min_search_time=0):
       info("Complete Career screen detected (training done, skipped overview).")
       return "complete"
-    if locate_grayscale(flow_templates["start_btn"], min_search_time=0) or \
-       locate_grayscale(flow_templates["start_career_button"], min_search_time=0):
+    if device_action.locate(flow_templates["start_btn"], min_search_time=0) or \
+       device_action.locate(flow_templates["start_career_button"], min_search_time=0):
       warning("Career setup screen detected while waiting for the training to finish (bounced session).")
       return "bounced"
-    if locate_grayscale(flow_templates["independent_training_banner"], min_search_time=0):
+    if device_action.locate(flow_templates["independent_training_banner"], min_search_time=0):
       debug("Independent Training view still on screen, training not finished yet.")
     state = detect_career_state(min_search=0)
     if state == "post_career":
@@ -956,7 +934,7 @@ def click_popup_career_button(timeout_s=20):
   deadline = time.time() + timeout_s
   clicks = 0
   while time.time() < deadline:
-    if locate_grayscale_and_click(flow_templates["career_independent_btn"], min_search_time=get_secs(1)):
+    if device_action.locate_and_click(flow_templates["career_independent_btn"], min_search_time=get_secs(1)):
       clicks += 1
       debug(f"Pressed the popup Career button (attempt {clicks}).")
       sleep(get_secs(1.5))
@@ -973,7 +951,7 @@ def click_popup_career_button(timeout_s=20):
 
 def open_post_career_popup(timeout_s=20):
   # Click the Post-Career ribbon, then the popup's Career button. True when the popup button was clicked (navigation is verified by the caller).
-  if not locate_grayscale_and_click(flow_templates["post_career"], min_search_time=get_secs(2)):
+  if not device_action.locate_and_click(flow_templates["post_career"], min_search_time=get_secs(2)):
     warning("Could not click the Post-Career button.")
     return False
   return click_popup_career_button(timeout_s)
@@ -984,14 +962,14 @@ def ensure_complete_career_screen(timeout_s=120):
   retries = 0
   while time.time() < deadline:
     device_action.flush_screenshot_cache()
-    if locate_grayscale(flow_templates["overview"], min_search_time=0):
+    if device_action.locate(flow_templates["overview"], min_search_time=0):
       info("Training overview screen detected, clicking OK.")
       wait_for_and_click("assets/buttons/ok_btn.png", timeout_s=get_secs(15))
-    if locate_grayscale(flow_templates["complete_career_btn"], min_search_time=0):
+    if device_action.locate(flow_templates["complete_career_btn"], min_search_time=0):
       # Confirm after a settle pause: right after navigation the screen can
       # still be covered by a transition overlay.
       sleep(get_secs(2))
-      if locate_grayscale(flow_templates["complete_career_btn"], min_search_time=0):
+      if device_action.locate(flow_templates["complete_career_btn"], min_search_time=0):
         return True
     if detect_career_state(min_search=0) == "post_career":
       if retries >= 3:
@@ -1025,7 +1003,7 @@ def handle_training_independently_state():
   # wait there for the OCR timer to hit zero (saves sitting on the resource-
   # heavy training view; no polling needed since the timer is read directly).
   info("Career state: Training Independently (training in progress).")
-  if not locate_grayscale_and_click(flow_templates["training_independently"], min_search_time=get_secs(2)):
+  if not device_action.locate_and_click(flow_templates["training_independently"], min_search_time=get_secs(2)):
     warning("Could not click the Training Independently button.")
     return False
   result = wait_independent_training_popup()
@@ -1058,7 +1036,7 @@ def handle_training_independently_state():
 def unspent_skill_points_visible(attempts=3):
   # Check for the unspent-points exclamation mark, retrying a few times: the icon can appear with a short animation.
   for attempt in range(1, attempts + 1):
-    if locate_grayscale("assets/ui/skill_exclamation.png", min_search_time=get_secs(2)):
+    if device_action.locate("assets/ui/skill_exclamation.png", min_search_time=get_secs(2)):
       return True
     if attempt < attempts:
       sleep(get_secs(1.5))
@@ -1078,7 +1056,7 @@ def spend_all_skill_points(max_rounds=5, screen_verified=False):
       debug("No unspent skill points detected.")
       return True
     info(f"Unspent skill points detected, opening the skill screen.")
-    if not locate_grayscale_and_click("assets/buttons/complete_career_skills_btn.png", min_search_time=get_secs(5)):
+    if not device_action.locate_and_click("assets/buttons/complete_career_skills_btn.png", min_search_time=get_secs(5)):
       warning("Could not find the Skills button on the Complete Career screen.")
       return False
     if round_num == 1:
@@ -1204,11 +1182,11 @@ def step_reach_home():
         return True
     # Recover screens a previous run (or a finished training) may have left open.
     handled = False
-    if locate_grayscale(flow_templates["overview"], min_search_time=get_secs(1)):
+    if device_action.locate(flow_templates["overview"], min_search_time=get_secs(1)):
       info("Training overview screen detected, collecting the results.")
       wait_for_and_click("assets/buttons/ok_btn.png", timeout_s=get_secs(15))
       handled = True
-    if locate_grayscale(flow_templates["complete_career_btn"], min_search_time=get_secs(1)):
+    if device_action.locate(flow_templates["complete_career_btn"], min_search_time=get_secs(1)):
       info("Complete Career screen detected, finishing the leftover career first.")
       if not complete_career():
         return False
@@ -1293,12 +1271,12 @@ def confirm_training_started(timeout_s=30):
     device_action.flush_screenshot_cache()
     if not bot.is_bot_running:
       return "failed"
-    if locate_grayscale(flow_templates["start_btn"], min_search_time=0):
+    if device_action.locate(flow_templates["start_btn"], min_search_time=0):
       debug("Final Confirmation screen still visible, waiting for it to leave.")
       bounce_sighted = False
       sleep(1)
       continue
-    if locate_grayscale(flow_templates["start_career_button"], min_search_time=0):
+    if device_action.locate(flow_templates["start_career_button"], min_search_time=0):
       if not bounce_sighted:
         debug("Support Formation screen sighted after Start!, re-checking before calling it a bounce.")
         bounce_sighted = True
@@ -1321,7 +1299,7 @@ def recover_after_start_bounce(timeout_s=60):
     # The Independent Training view has neither a back button nor a home
     # career button: once it is up, the training is running and there is
     # nowhere left to walk.
-    if locate_grayscale(flow_templates["independent_training_banner"], min_search_time=0):
+    if device_action.locate(flow_templates["independent_training_banner"], min_search_time=0):
       info("Independent Training view is on screen, the training is running.")
       return "training_independently"
     state = detect_career_state(min_search=0)
@@ -1348,11 +1326,11 @@ def navigate_home_from_training(timeout_s=30):
     if detect_career_state(min_search=0):
       info("Home screen reached from the Independent Training view.")
       return True
-    if locate_grayscale_and_click(flow_templates["to_home_menu"], min_search_time=get_secs(1)):
+    if device_action.locate_and_click(flow_templates["to_home_menu"], min_search_time=get_secs(1)):
       info("Clicked To Home in the menu.")
       sleep(get_secs(2))
       continue
-    if locate_grayscale_and_click(flow_templates["menu_btn"], min_search_time=get_secs(1)):
+    if device_action.locate_and_click(flow_templates["menu_btn"], min_search_time=get_secs(1)):
       debug("Opened the menu.")
       sleep(get_secs(1.5))
       continue
@@ -1367,11 +1345,11 @@ def run_career_cycle():
   info("Navigating to the home screen.")
   if not step_reach_home():
     return "failed"
-  if locate_grayscale(flow_templates["post_career"], min_search_time=get_secs(2)):
+  if device_action.locate(flow_templates["post_career"], min_search_time=get_secs(2)):
     if not handle_post_career_state():
       return "failed"
     return "restarted"  # leftover career finished, loop back to screen 1
-  if locate_grayscale(flow_templates["training_independently"], min_search_time=get_secs(2)):
+  if device_action.locate(flow_templates["training_independently"], min_search_time=get_secs(2)):
     if not handle_training_independently_state():
       return "failed"
     return "restarted"  # training finished, loop back to screen 1
