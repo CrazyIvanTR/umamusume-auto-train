@@ -7,54 +7,31 @@
 # Runs indefinitely, one full career cycle after another. Screen numbers refer
 # to the screenshots in devtools/independent_flow; the whole loop lives in
 # run_career_cycle():
-#   1   home screen -> career button state (1B shows the Independent Training
-#       popup while a career is running/finished); unrecognized intro/notice
-#       screens are advanced with a safe-space tap:
-#         Post-Career ribbon (training completed) -> popup -> Career button ->
-#         Complete Career screen -> finish the career,
-#         Training Independently ribbon (training running) -> popup -> OCR
-#         timer -> wait at the popup until it shows 0:00:00 (interrupting
-#         popups are dismissed with their OK button; if the popup closes
-#         first, the overview/Complete Career screen is detected instead),
-#         Career button (no training) -> start a new career
+#   1   home screen -> career button state (1B shows the Independent Training popup while a career is running/finished); unrecognized intro/notice screens are advanced with a safe-space tap:
+#         Post-Career ribbon (training completed) -> popup -> Career button -> Complete Career screen -> finish the career,
+#         Training Independently ribbon (training running) -> popup -> OCR timer -> wait at the popup until it shows 0:00:00 (interrupting popups are dismissed with their OK button; if the popup closes first, the overview/Complete Career screen is detected instead), Career button (no training) -> start a new career
 #   2   scenario selection -> next
 #   3   trainee selection -> next
 #   4   legacy selection -> next
 #   5   support formation (empty) -> friends card zone
-#   6   borrow card popup -> card picked via OCR search (--card name, scroll +
-#       refresh until found) or the first card with the last login banner
+#   6   borrow card popup -> card picked via OCR search (--card name, scroll + refresh until found) or the first card with the last login banner
 #   7   support formation (filled) -> start career
-#   8   final confirmation (initial) -> select independent training
-#       (if not selected) -> edit
+#   8   final confirmation (initial) -> select independent training (if not selected) -> edit
 #   9   agenda screen -> my agendas
 #   10  my agendas -> load list slot 1/2/3 (--agenda)
-#   11  agenda (filled): confirm the load (0, 1 or 2 popups: overwrite.png
-#       else close_btn.png), close the agenda screen
+#   11  agenda (filled): confirm the load (0, 1 or 2 popups: overwrite.png else close_btn.png), close the agenda screen
 #   12  final confirmation (filled) -> hit Start the moment it is reachable
-#   13  independent training: verify it actually began (the game can bounce
-#       back to the Support Formation screen right after Start!), then leave
-#       for the home screen via the Menu (13B: To Home) and wait at the
-#       Independent Training popup for the OCR timer to hit 0:00:00 (a popup
-#       that closes first is caught by polling the completion screens)
+#   13  independent training: verify it actually began (the game can bounce back to the Support Formation screen right after Start!), then leave for the home screen via the Menu (13B: To Home) and wait at the Independent Training popup for the OCR timer to hit 0:00:00 (a popup that closes first is caught by polling the completion screens)
 #   14  overview screen -> OK
-#   15  complete career screen -> spend all skill points (16-18: skill screen
-#       rounds, repeating while unspent points are detected):
-#       read SP counter (OCR), scan the whole list recording cost + gold flag +
-#       buy-list match, scroll back to top, then a two-tier greedy second pass:
-#       tier 1 buys every affordable skill from the stored buy list
-#       (config.json -> skill.skill_list), tier 2 maximizes the number of
-#       remaining skills bought (a gold skill's listed price includes the
-#       skill under it, which buying the gold auto-buys; if the base was picked
-#       as a cheaper single the plan upgrades it to the gold for the difference),
-#       the top of the list is reserved (pre-bought row 1 + 2 rows never bought)
+#   15  complete career screen -> spend all skill points (16-18: skill screen rounds, repeating while unspent points are detected): read SP counter (OCR), scan the whole list recording cost + gold flag + buy-list match, scroll back to top, then a two-tier greedy second pass: tier 1 buys every affordable skill from the stored buy list (config.json -> skill.skill_list), tier 2 maximizes the number of remaining skills bought (a gold skill's listed price includes the skill under it, which buying the gold auto-buys; if the base was picked as a cheaper single the plan upgrades it to the gold for the difference), the top of the list is reserved (pre-bought row 1 + 2 rows never bought)
 #   18  complete career (all points spent) -> Complete Career button
 #   19  complete career confirmation -> Finish
 #   20  career rank -> Next
-#   21  sparks, umamusume details, rating, rewards and the event reward
-#       screens: Confirm x2, Close, then an adaptive Next loop that dismisses
-#       the follow-trainer popup with Cancel when it appears, checks to_home
-#       each iteration and clicks it on the career complete screen
+#   21  sparks, umamusume details, rating, rewards and the event reward screens: Confirm x2, Close, then an adaptive Next loop that dismisses the follow-trainer popup with Cancel when it appears, checks to_home each iteration and clicks it on the career complete screen
 #       (28) -> loop back to screen 1
+#
+#   TODO for later
+#   - I want to save a screenshot of @devtools/independent_flow/21 - Sparks.jpg screen each run. It can be saved under log directory in a folder, last 20 screenshots are kept.
 
 import argparse
 import os
@@ -234,6 +211,7 @@ def game_window_ltrb():
 MAX_CARD_CYCLES = 75          # refresh cycles before giving up on a card
 MAX_ADVANCE_TAPS = 20         # safe-space taps allowed per blocked screen before giving up
 CARD_NAME_MATCH_THRESHOLD = 0.75  # rapidfuzz ratio required to accept an OCR name match
+CARD_OCR_DEBUG_TOP_N = 20      # closest OCR readouts logged when a card name does not match
 
 # Skill screen ("Learn") constants, measured on a 800x1080 portrait screenshot.
 SKILL_SP_OFFSETS = (535, 332, -155, -698)  # SP counter, offsets relative to GAME_WINDOW_BBOX
@@ -379,6 +357,7 @@ def ocr_find_card(screenshot_img, card_name):
   target = normalize_name(card_name)
   best = None
   best_score = 0.0
+  scored = []
   for quad, text, confidence in results:
     normalized = normalize_name(text)
     # Score both the raw read and the bracket-stripped one: stripping helps
@@ -386,6 +365,7 @@ def ocr_find_card(screenshot_img, card_name):
     # (e.g. "Ivy" -> "lIvy").
     stripped = normalize_name(strip_bracket_artifacts(text))
     score = max(fuzz.ratio(target, normalized), fuzz.ratio(target, stripped)) / 100.0
+    scored.append((score, text, confidence))
     if score > best_score:
       best_score = score
       best = (quad, text)
@@ -394,6 +374,13 @@ def ocr_find_card(screenshot_img, card_name):
     xs = [point[0] for point in quad]
     ys = [point[1] for point in quad]
     return (int(sum(xs) / 4), int(sum(ys) / 4)), text, best_score
+  # No accepted match: log the closest readouts so a failed name match can be
+  # diagnosed from log_debug.txt (only the top few, to keep the log readable).
+  scored.sort(key=lambda item: item[0], reverse=True)
+  reads = ", ".join(f"\"{text}\" {score:.2f} (conf {confidence:.2f})"
+                    for score, text, confidence in scored[:CARD_OCR_DEBUG_TOP_N])
+  debug(f"Card OCR for \"{card_name}\" found no match (best {best_score:.2f}, "
+        f"threshold {CARD_NAME_MATCH_THRESHOLD:.2f}); top readouts: {reads or 'none'}")
   return None
 
 def card_list_page_changed(before, after):
