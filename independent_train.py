@@ -80,6 +80,8 @@ from core.recognizer import compare_brightness
 from utils.screenshot import enhanced_screenshot, are_screenshots_same
 import utils.adb_actions as adb_actions
 from utils.adb_actions import init_adb
+from adbutils import adb
+from adbutils.errors import AdbError
 from utils.log import info, warning, error, debug, args, init_logging
 from utils.tools import sleep, get_secs
 from rapidfuzz import fuzz
@@ -162,6 +164,16 @@ def focus_umamusume():
     error(f"Error focusing window: {e}")
     return False
   return True
+
+def adb_alive():
+  # Cheap liveness probe: is our serial still listed as a ready device?
+  # adb.list() only queries the local ADB server (no device round-trip).
+  if not bot.use_adb:
+    return True
+  try:
+    return any(entry.serial == bot.device_id and entry.state == "device" for entry in adb.list())
+  except Exception:
+    return False
 
 # ---------------------------------------------------------------------------
 # Launch parameters (own parser, doesn't interfere with utils.log's args)
@@ -852,8 +864,17 @@ def wait_independent_training_popup(max_wait_s=55 * 60):
     if seconds_left is None:
       if dismiss_popup_ok():
         continue
-      warning("Could not read the time left on the Independent Training popup.")
-      return None
+      if device_action.locate(flow_templates["independent_training_popup"], min_search_time=0):
+        warning("Could not read the time left on the Independent Training popup.")
+        return None
+      # The popup is gone: the training may have finished (handled by
+      # poll_training_completion_state) or the screen changed under us (e.g.
+      # the emulator was restarted). Restart the cycle to re-detect it.
+      state = poll_training_completion_state()
+      if state:
+        return state
+      warning("Independent Training popup is gone, restarting the cycle to re-detect the screen.")
+      return "restarted"
     if seconds_left <= 0:
       info("Independent Training popup shows 0:00:00 left, training finished.")
       return "zero"
@@ -882,13 +903,16 @@ def wait_independent_training_popup(max_wait_s=55 * 60):
     if confirm is None:
       if dismiss_popup_ok():
         continue
+      if device_action.locate(flow_templates["independent_training_popup"], min_search_time=0):
+        warning("Could not re-read the popup timer to confirm the countdown.")
+        return None
       # The popup closed before the confirm read: treat a following
       # completion screen as success instead of aborting the cycle.
       state = poll_training_completion_state()
       if state:
         return state
-      warning("Could not re-read the popup timer to confirm the countdown.")
-      return None
+      warning("Independent Training popup is gone after the countdown, restarting the cycle to re-detect the screen.")
+      return "restarted"
     debug(f"Popup timer re-read after the countdown: {confirm}s left.")
     if confirm <= 0:
       info("Independent Training popup shows 0:00:00 left, training finished.")
@@ -998,17 +1022,17 @@ def handle_post_career_state():
   info("Finished the leftover career, restarting the cycle.")
   return True
 
-def handle_training_independently_state():
-  # Training Independently ribbon: a training is running. Open its popup and
-  # wait there for the OCR timer to hit zero (saves sitting on the resource-
-  # heavy training view; no polling needed since the timer is read directly).
-  info("Career state: Training Independently (training in progress).")
-  if not device_action.locate_and_click(flow_templates["training_independently"], min_search_time=get_secs(2)):
-    warning("Could not click the Training Independently button.")
-    return False
+def finish_from_training_popup():
+  # Wait on the Independent Training popup timer, then finish the career from
+  # whatever state the popup left us in. Shared by the ribbon path and the
+  # "popup already open after an emulator restart" path.
   result = wait_independent_training_popup()
   if not result:
     return False
+  if result == "restarted":
+    # The popup vanished (e.g. the emulator restarted): let the caller restart
+    # the cycle so the current screen is re-detected.
+    return True
   if result == "post_career":
     info("Training finished and the career already ended; handling the Post-Career state.")
     return handle_post_career_state()
@@ -1032,6 +1056,19 @@ def handle_training_independently_state():
     return False
   info("Complete Career screen reached, finishing the leftover career.")
   return complete_career(screen_verified=True)
+
+def handle_training_independently_state():
+  # Training Independently ribbon: a training is running. Open its popup and
+  # wait there for the OCR timer to hit zero (saves sitting on the resource-
+  # heavy training view; no polling needed since the timer is read directly).
+  info("Career state: Training Independently (training in progress).")
+  if not device_action.locate_and_click(flow_templates["training_independently"], min_search_time=get_secs(2)):
+    # The popup may already be open (e.g. after an emulator restart); continue
+    # on it instead of failing.
+    if not device_action.locate(flow_templates["independent_training_popup"], min_search_time=0):
+      warning("Could not click the Training Independently button.")
+      return False
+  return finish_from_training_popup()
 
 def unspent_skill_points_visible(attempts=3):
   # Check for the unspent-points exclamation mark, retrying a few times: the icon can appear with a short animation.
@@ -1341,6 +1378,14 @@ def navigate_home_from_training(timeout_s=30):
 
 def run_career_cycle():
   # One full career loop: home -> career setup (screens 2-12) -> training (~50 min) -> overview -> skill points -> completion -> home again. Returns "completed" (ran start to finish), "restarted" (leftover handled or launch failed, loop back to the home screen) or "failed".
+  # After an emulator restart the game can come back on any screen; detect the
+  # popup or the training view before walking home.
+  if device_action.locate(flow_templates["independent_training_popup"], min_search_time=0):
+    info("Independent Training popup is already open, resuming the wait.")
+    return "restarted" if finish_from_training_popup() else "failed"
+  if device_action.locate(flow_templates["independent_training_banner"], min_search_time=0):
+    info("Independent Training view is on screen, navigating home.")
+    navigate_home_from_training()
   # Screen 1. Home screen: dispatch on the career button state. The popup in 1B (Independent Training) is handled inside the two career-state handlers below.
   info("Navigating to the home screen.")
   if not step_reach_home():
@@ -1514,12 +1559,24 @@ def main():
   if not focus_umamusume():
     error("Failed to focus Umamusume window")
     return
+  if bot.use_adb and (adb_actions.device is None or not adb_alive()):
+    error(f"No ADB connection to {bot.device_id}, exiting.")
+    return
   cycle = 0
   try:
     while bot.is_bot_running:
       cycle += 1
       info(f"=== Training cycle {cycle} starting. ===")
-      status = run_career_cycle()
+      try:
+        status = run_career_cycle()
+      except device_action.BotStopException:
+        raise
+      except (AdbError, OSError) as e:
+        # No connection when an action was attempted: exit cleanly instead of
+        # crashing. Restarting the bot resumes from whatever screen the game
+        # is on.
+        error(f"ADB connection lost ({e}), exiting.")
+        break
       if status == "failed":
         error("Independent training flow failed, see logs above.")
         break
