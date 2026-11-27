@@ -54,7 +54,7 @@ import core.bot as bot
 from PIL import Image
 from core.ocr import get_reader, extract_text, extract_number, extract_allowed_text
 from core.recognizer import compare_brightness
-from utils.screenshot import enhanced_screenshot, are_screenshots_same
+from utils.screenshot import enhanced_screenshot, are_screenshots_same, enhance_image_for_ocr
 import utils.adb_actions as adb_actions
 from utils.adb_actions import init_adb
 from adbutils import adb
@@ -62,6 +62,7 @@ from adbutils.errors import AdbError
 from utils.log import info, warning, error, debug, args, init_logging
 from utils.tools import sleep, get_secs
 from rapidfuzz import fuzz
+from core.events import find_best_match
 
 config.reload_config()
 init_logging()
@@ -349,38 +350,38 @@ def strip_bracket_artifacts(text):
 
 def ocr_find_card(screenshot_img, card_name):
   # OCR the card list, return (x, y, matched_text, score) of the best name match or None. Coordinates are relative to the passed screenshot.
-  reader = get_reader()
-  results = reader.readtext(
-    screenshot_img,
-    allowlist="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-'&.! ",
-  )
-  target = normalize_name(card_name)
-  best = None
-  best_score = 0.0
-  scored = []
-  for quad, text, confidence in results:
-    normalized = normalize_name(text)
-    # Score both the raw read and the bracket-stripped one: stripping helps
-    # short names most, while the raw read protects legit artifact initials
-    # (e.g. "Ivy" -> "lIvy").
-    stripped = normalize_name(strip_bracket_artifacts(text))
-    score = max(fuzz.ratio(target, normalized), fuzz.ratio(target, stripped)) / 100.0
-    scored.append((score, text, confidence))
-    if score > best_score:
-      best_score = score
-      best = (quad, text)
-  if best and best_score >= CARD_NAME_MATCH_THRESHOLD:
-    quad, text = best
-    xs = [point[0] for point in quad]
-    ys = [point[1] for point in quad]
-    return (int(sum(xs) / 4), int(sum(ys) / 4)), text, best_score
-  # No accepted match: log the closest readouts so a failed name match can be
-  # diagnosed from log_debug.txt (only the top few, to keep the log readable).
-  scored.sort(key=lambda item: item[0], reverse=True)
-  reads = ", ".join(f"\"{text}\" {score:.2f} (conf {confidence:.2f})"
-                    for score, text, confidence in scored[:CARD_OCR_DEBUG_TOP_N])
-  debug(f"Card OCR for \"{card_name}\" found no match (best {best_score:.2f}, "
-        f"threshold {CARD_NAME_MATCH_THRESHOLD:.2f}); top readouts: {reads or 'none'}")
+  icon_matches = device_action.multi_match_templates(constants.SUPPORT_ICONS, screenshot_img, threshold=0.8, template_scaling=0.88)
+  all_matches = []
+  for match_category in icon_matches.values():
+    for match in match_category:
+      all_matches.append(match)
+  results = []
+  for match in all_matches:
+    match_dict = {
+      "match":match,
+      "card_name":"",
+      #for now we don't need support_name but it could be useful later. DO NOT DELETE
+      "support_name":""
+    }
+    cut_screenshot = device_action.screenshot(region_xywh=(match[0]+35, match[1]+35, 430, 25))
+    cut_screenshot = enhance_image_for_ocr(cut_screenshot, resize_factor=3, binarize_threshold=None)
+    match_dict["card_name"]=extract_text(cut_screenshot)
+
+    #for now we don't need support_name but it could be useful later. DO NOT DELETE
+    #cut_screenshot = device_action.screenshot(region_xywh=(match[0]+35, match[1]+60, 430, 25))
+    #cut_screenshot = enhance_image_for_ocr(cut_screenshot, resize_factor=3, binarize_threshold=None)
+    #match_dict["support_name"]=extract_text(cut_screenshot)
+    results.append(match_dict)
+  
+  sorted_texts = [{"event_name": item["card_name"]} for item in results]
+  result = find_best_match(card_name, sorted_texts)
+  if result[1] <= CARD_NAME_MATCH_THRESHOLD:
+    #return none here because of dumbass AI code
+    return None
+  for item in results:
+    if result[0] == item["card_name"]:
+      return (item["match"][0], item["match"][1]), result[0], result[1]
+  #should not happen
   return None
 
 def card_list_page_changed(before, after):
@@ -393,8 +394,11 @@ def scroll_card_list():
   device_action.flush_screenshot_cache()
   before = device_action.screenshot()
   x, y = game_window_ltrb()[0], game_window_ltrb()[1]
-  device_action.swipe((x + 400, y + 880), (x + 400, y + 480), duration=0.4)
-  sleep(0.6)
+  #shortened distance because some cards were halfway through the text on the bottom of the screen
+  #then at the end of swipe they were halfway through the text on the top of the screen
+  device_action.swipe((x + 400, y + 820), (x + 400, y + 470), duration=0.4)
+  #0.6 is not enough time for the swipe action's inertia to finish, so making this 1
+  sleep(1)
   device_action.flush_screenshot_cache()
   after = device_action.screenshot()
   return card_list_page_changed(before, after)
